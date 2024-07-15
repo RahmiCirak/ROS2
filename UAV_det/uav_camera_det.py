@@ -13,16 +13,23 @@ model = YOLO('best.pt')
 class ImageSubscriber(Node):
     def __init__(self):
         super().__init__('image_subscriber')
-        self.subscription = self.create_subscription(
+        self.subscription_rgb = self.create_subscription(
             Image, 
             'camera', 
-            self.listener_callback, 
+            self.listener_callback_rgb, 
+            10)       
+        self.subscription_depth = self.create_subscription(
+            Image, 
+            'depth_camera', 
+            self.listener_callback_depth, 
             10)
-        self.subscription
+        self.subscription_rgb
+        self.subscription_depth
 
         self.br = CvBridge()
         self.target_x = None
         self.target_y = None
+        self.depth_image = None
         
         # Publisher for sending movement commands
         qos_profile = QoSProfile(
@@ -33,7 +40,7 @@ class ImageSubscriber(Node):
         )
         self.pub = self.create_publisher(Twist, '/px4_1/offboard_velocity_cmd', qos_profile)
 
-    def listener_callback(self, data):
+    def listener_callback_rgb(self, data):
         self.get_logger().info('Receiving video frame')
 
         # ROS Image mesajını OpenCV görüntüsüne dönüştür
@@ -66,11 +73,32 @@ class ImageSubscriber(Node):
         # Sonuçları Göster
         cv2.imshow('Detected Frame', img)
         cv2.waitKey(1)
+    
+    def listener_callback_depth(self, data):
+        self.get_logger().info('Receiving Depth video frame')
+        # Convert the ROS Image message to OpenCV image
+        self.depth_image = self.br.imgmsg_to_cv2(data, desired_encoding="passthrough")
+
 
     def track_object(self, x, y, center_w, center_h):
+        if self.depth_image is None:
+            self.get_logger().info("No depth image received yet.")
+            return
+        
+        # Get the shape of the depth image
+        height, width = self.depth_image.shape
+
         # Normalize x and y values to a range of -1 to 1
         norm_x = (x - center_w) / center_w
         norm_y = (y - center_h) / center_h
+
+        # Clip the x and y values to the valid range
+        x_clipped = max(0, min(int(x), width - 1))
+        y_clipped = max(0, min(int(y), height - 1))
+
+        # Get the depth value at the detected object's center
+        depth_value = self.depth_image[y_clipped, x_clipped]
+        self.get_logger().info(f"Depth value at ({x}, {y}) is {depth_value}")
 
         # Create Twist message
         twist = Twist()
@@ -98,9 +126,19 @@ class ImageSubscriber(Node):
         else:
             twist.linear.x = 0.0
 
+
+        # Move forward or backward based on depth value
+        desired_distance = 2.0  # Desired distance from the object
+        if depth_value > desired_distance + 1.0:
+            twist.linear.y = 1.0  # Move forward
+        elif depth_value < desired_distance - 1.0:
+            twist.linear.y = -1.0 # Move backward
+        else:
+            twist.linear.y = 0.0
+
         # Publish the twist message
         self.pub.publish(twist)
-        self.get_logger().info(f"Publishing twist message: linear.z = {twist.linear.z}, linear.y = {twist.linear.x}")
+        self.get_logger().info(f"Publishing twist message: linear.z = {twist.linear.z}, linear.y = {twist.linear.x}, linear.x = {twist.linear.y}")
 
 def main(args=None):
     rclpy.init(args=args)
